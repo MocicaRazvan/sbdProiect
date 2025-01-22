@@ -1,0 +1,376 @@
+----------------BRO ADMIN----------------
+--Creare tabelului de chei unde fiecare client are o cheie unica pentru criptarea antrenamentelor
+--bro_admin_criptare.sql
+
+create or replace function select_random_from_nr_list (
+   input_list sys.odcinumberlist
+) return number is
+   selected_value number;
+begin
+   select input_list(trunc(dbms_random.value(
+      1,
+      input_list.count + 1
+   )))
+     into selected_value
+     from dual;
+
+   return selected_value;
+end;
+/
+
+
+
+create table chei_client (
+   id_client number
+      constraint fk_client_chei
+         references client ( id_client )
+   primary key,
+   mod_op    int not null,
+   cheie     raw(16) not null
+);
+
+create or replace procedure insert_into_chei_client (
+   p_client number
+) is
+   mod_op_value number;
+   v_nr         smallint;
+   v_cheie      raw(16) := dbms_crypto.randombytes(16);
+begin
+   select count(*)
+     into v_nr
+     from chei_client c
+    where c.id_client = p_client;
+   if v_nr > 0 then
+      raise_application_error(
+         -20022,
+         'The client is already in the table keys. Client ' || p_client
+      );
+   end if;
+   mod_op_value := dbms_crypto.encrypt_aes128 + bro_admin.select_random_from_nr_list(sys.odcinumberlist(
+      dbms_crypto.pad_pkcs5,
+      dbms_crypto.pad_zero
+   )) + bro_admin.select_random_from_nr_list(sys.odcinumberlist(
+      dbms_crypto.chain_cbc,
+      dbms_crypto.chain_cfb,
+      dbms_crypto.chain_ecb,
+      dbms_crypto.chain_ofb
+   ));
+
+   insert into chei_client (
+      id_client,
+      mod_op,
+      cheie
+   ) values ( p_client,
+              mod_op_value,
+              v_cheie );
+end;
+/
+
+exec insert_into_chei_client(18);
+exec insert_into_chei_client(18);
+exec insert_into_chei_client(19);
+exec insert_into_chei_client(20);
+exec insert_into_chei_client(21);
+exec insert_into_chei_client(22);
+exec insert_into_chei_client(25);
+exec insert_into_chei_client(26);
+exec insert_into_chei_client(27);
+
+select *
+  from chei_client;
+commit;
+
+create or replace type chei_client_object as object (
+      id_client number,
+      mod_op    int,
+      cheie     raw(16)
+);
+/
+
+create or replace function get_client_key return chei_client_object is
+   res chei_client_object;
+begin
+   select chei_client_object(
+      c.id_client,
+      c.mod_op,
+      c.cheie
+   )
+     into res
+     from account_mapping a
+     join chei_client c
+   on a.id_persoana = c.id_client
+    where username = sys_context(
+      'userenv',
+      'session_user'
+   );
+
+   return res;
+exception
+   when no_data_found then
+      raise_application_error(
+         -20023,
+         'Client with username '
+         || sys_context(
+            'userenv',
+            'session_user'
+         )
+         || ' does not have a cript key'
+      );
+end;
+/
+
+--bro_admin_antrenor_seed.sql
+
+create or replace function &&user_name..number_to_raw (
+   n number
+) return raw is
+begin
+   return hextoraw(to_char(
+      n,
+      'FM0X'
+   ));
+end;
+/
+
+
+create or replace type &&user_name..decrypted_client_record as object (
+      id_program                varchar2(100),
+      descriere_program         varchar2(2500),
+      tip_program               varchar2(100),
+      durata_antrenament        varchar2(50),
+      id_echipament             varchar2(100),
+      nume_echipament           varchar2(255),
+      data_instalare_echipament varchar2(50),
+      data_revizie_echipament   varchar2(50),
+      id_filiala                varchar2(100),
+      id_client                 varchar2(100),
+      checksum                  raw(16)
+);
+/
+
+
+create or replace type &&user_name..decrypted_client_table as
+   table of &&user_name..decrypted_client_record;
+/
+
+
+
+create or replace function &&user_name..fetch_decrypted_client_data (
+   p_mod_op    number,
+   p_cheie     raw,
+   p_id_client number
+) return &&user_name..decrypted_client_table
+   pipelined
+is
+begin
+   for r in (
+      select decript_string(
+         ca.id_program,
+         p_mod_op,
+         p_cheie
+      ) as id_program,
+             decript_string(
+                ca.descriere_program,
+                p_mod_op,
+                p_cheie
+             ) as descriere_program,
+             decript_string(
+                ca.tip_program,
+                p_mod_op,
+                p_cheie
+             ) as tip_program,
+             decript_string(
+                ca.durata_antrenament,
+                p_mod_op,
+                p_cheie
+             ) as durata_antrenament,
+             decript_string(
+                ca.id_echipament,
+                p_mod_op,
+                p_cheie
+             ) as id_echipament,
+             decript_string(
+                ca.nume_echipament,
+                p_mod_op,
+                p_cheie
+             ) as nume_echipament,
+             decript_string(
+                ca.data_instalare_echipament,
+                p_mod_op,
+                p_cheie
+             ) as data_instalare_echipament,
+             decript_string(
+                ca.data_revizie_echipament,
+                p_mod_op,
+                p_cheie
+             ) as data_revizie_echipament,
+             decript_string(
+                ca.id_filiala,
+                p_mod_op,
+                p_cheie
+             ) as id_filiala,
+             decript_string(
+                ca.id_client,
+                p_mod_op,
+                p_cheie
+             ) as id_client,
+             checksum
+        from &&user_name..client_antrenament ca
+       where regexp_like ( decript_string(
+         ca.id_client,
+         p_mod_op,
+         p_cheie
+      ),
+                           '^\d+$' )
+   ) loop
+      pipe row ( decrypted_client_record(
+         r.id_program,
+         r.descriere_program,
+         r.tip_program,
+         r.durata_antrenament,
+         r.id_echipament,
+         r.nume_echipament,
+         r.data_instalare_echipament,
+         r.data_revizie_echipament,
+         r.id_filiala,
+         r.id_client,
+         r.checksum
+      ) );
+   end loop;
+   return;
+end;
+/
+
+commit;
+
+exit;
+
+----------------BRO ANTRENOR----------------
+-- Elementele pentru criptare sunt deja create la seed pe schema antrenor
+--bro_antrenor1_cript_show.sql
+
+with c as (
+   select mod_op,
+          cheie
+     from bro_admin.chei_client
+    where id_client = 18
+)
+select decript_string(
+   ca.id_program,
+   c.mod_op,
+   c.cheie
+) as id_program,
+       decript_string(
+          ca.descriere_program,
+          c.mod_op,
+          c.cheie
+       ) as descriere_program,
+       decript_string(
+          ca.tip_program,
+          c.mod_op,
+          c.cheie
+       ) as tip_program,
+       decript_string(
+          ca.durata_antrenament,
+          c.mod_op,
+          c.cheie
+       ) as durata_antrenament,
+       decript_string(
+          ca.id_echipament,
+          c.mod_op,
+          c.cheie
+       ) as id_echipament,
+       decript_string(
+          ca.nume_echipament,
+          c.mod_op,
+          c.cheie
+       ) as nume_echipament,
+       decript_string(
+          ca.data_instalare_echipament,
+          c.mod_op,
+          c.cheie
+       ) as data_instalare_echipament,
+       decript_string(
+          ca.data_revizie_echipament,
+          c.mod_op,
+          c.cheie
+       ) as data_revizie_echipament,
+       decript_string(
+          ca.id_filiala,
+          c.mod_op,
+          c.cheie
+       ) as id_filiala,
+       decript_string(
+          ca.id_client,
+          c.mod_op,
+          c.cheie
+       ) as id_client,
+       checksum
+  from client_antrenament ca,
+       c;
+
+
+select *
+  from table ( fetch_decrypted_client_data(
+   (
+      select mod_op
+        from bro_admin.chei_client
+       where id_client = 18
+   ),
+   (
+      select cheie
+        from bro_admin.chei_client
+       where id_client = 18
+   ),
+   18
+) );
+
+
+----------------BRO CLIENT----------------
+--Vizualizarea criptarii pentru user
+--bro_client1_select_cript.sql
+
+select bro_admin.get_client_key
+  from dual;
+  
+select ( bro_admin.get_client_key() ).id_client as id_client,
+       ( bro_admin.get_client_key() ).mod_op as mod_op,
+       ( bro_admin.get_client_key() ).cheie as cheie
+  from dual;
+
+with user_key as (
+   select bro_admin.get_client_key() as client_key
+     from dual
+)
+select ( user_key.client_key ).id_client as id_client,
+       ( user_key.client_key ).mod_op as mod_op,
+       ( user_key.client_key ).cheie as cheie
+  from user_key;
+
+
+with user_key as (
+   select bro_admin.get_client_key() as client_key
+     from dual
+)
+
+
+
+SELECT ant.*,cs.*,
+    case when ant.checksum = cs.cur_cs then 'ok' else 'not ok' end as cs_v
+FROM 
+    (SELECT bro_admin.get_client_key() AS client_key
+    FROM dual)
+ user_key,
+LATERAL (SELECT *FROM TABLE(
+        bro_antrenor1.fetch_decrypted_client_data(
+            p_mod_op=>user_key.client_key.mod_op,
+            p_cheie=>user_key.client_key.cheie,
+            p_id_client=>user_key.client_key.id_client))) ant,
+lateral (
+select bro_antrenor1.hash_checksum(SYS.ODCIVARCHAR2LIST(ant.id_program,ant.descriere_program,ant.tip_program,
+                        ant.durata_antrenament,ant.id_echipament,ant.nume_echipament,
+                        ant.data_instalare_echipament,ant.data_revizie_echipament,ant.id_filiala,
+                        user_key.client_key.cheie)) as cur_cs from dual
+) cs;
+
+select * from bro_admin.programs_view;

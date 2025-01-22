@@ -1,6 +1,5 @@
 @echo off
 
-
 impdp bro_import/bro_import@//localhost:1522/orclpdb ^
 remap_table=persoana:persoana_mask ^
 remap_table=angajat:angajat_mask ^
@@ -13,7 +12,6 @@ dumpfile=mask_person.dmp ^
 logfile=mask_person_import.log ^
 parallel=8 ^
 transform=disable_archive_logging:y
-
 
 
 echo Done importing mask persoana

@@ -1,4 +1,4 @@
---sys 
+
 alter session set container = orclpdb;
 
 SHOW parameter audit_trail;

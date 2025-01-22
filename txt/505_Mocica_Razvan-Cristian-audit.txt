@@ -1,0 +1,435 @@
+----------------SYS----------------
+--Auditare standard
+--sys_audit_1.sql
+
+alter session set container = orclpdb;
+
+SHOW parameter audit_trail;
+
+audit insert,update on bro_admin.client_extins by access whenever not successful;
+audit insert,update,delete on bro_admin.echipament;
+audit insert,update,delete on bro_admin.account_mapping;
+audit insert,update on bro_admin.supliment;
+
+create or replace directory json_dir as 'D:\ORACLEEE\INSTALL\ADMIN\ORCL\MYDUMP';
+
+-- Multumiri deosebite primului raspuns de aici si nu documentatiei oracle care este oribila
+-- https://stackoverflow.com/questions/50417586/write-a-clob-to-file-in-oracle  
+create or replace procedure convert_clob_2_file (
+   p_filename in varchar2,
+   p_dir      in varchar2,
+   p_clob     in clob
+) as
+   v_lob_image_id number;
+   v_clob         clob := p_clob;
+   v_buffer       raw(32767);
+   c_buffer       varchar2(32767);
+   v_buffer_size  binary_integer;
+   v_amount       binary_integer;
+   v_pos          number(38) := 1;
+   v_clob_size    integer;
+   v_out_file     utl_file.file_type;
+begin
+   v_pos := 1;
+   v_clob_size := dbms_lob.getlength(v_clob);
+   v_buffer_size := 32767;
+   v_amount := v_buffer_size;
+   if ( dbms_lob.isopen(v_clob) = 0 ) then
+      dbms_lob.open(
+         v_clob,
+         dbms_lob.lob_readonly
+      );
+   end if;
+   v_out_file := utl_file.fopen(
+      p_dir,
+      p_filename,
+      'WB',
+      max_linesize => 32767
+   );
+   while v_amount >= v_buffer_size loop
+      dbms_lob.read(
+         v_clob,
+         v_amount,
+         v_pos,
+         c_buffer
+      );
+      v_buffer := utl_raw.cast_to_raw(c_buffer);
+      v_pos := v_pos + v_amount;
+      utl_file.put_raw(
+         v_out_file,
+         v_buffer,
+         true
+      );
+      utl_file.fflush(v_out_file);
+   end loop;
+   utl_file.fflush(v_out_file);
+   utl_file.fclose(v_out_file);
+   if ( dbms_lob.isopen(v_clob) = 1 ) then
+      dbms_lob.close(v_clob);
+   end if;
+exception
+   when others then
+      if ( dbms_lob.isopen(v_clob) = 1 ) then
+         dbms_lob.close(v_clob);
+      end if;
+      raise;
+end;
+/
+
+create or replace procedure save_audit_to_json (
+   p_obj_name varchar2
+) is
+   obj_name   varchar2(128) := dbms_assert.simple_sql_name(p_obj_name);
+   a_file     utl_file.file_type;
+   a_json     clob;
+   a_filename varchar2(1000);
+begin
+   for owner_rec in (
+      select distinct obj$creator
+        from sys.aud$
+       where obj$name = upper(obj_name)
+   ) loop
+      a_filename := 'audit_json_bro_'
+                    || owner_rec.obj$creator
+                    || '_'
+                    || obj_name
+                    || '_'
+                    || to_char(
+         sysdate,
+         'YYYYMMDD_HH24MISS'
+      )
+                    || '.json';
+
+
+
+
+      select to_clob(json_arrayagg(
+         json_object(
+            key 'sessionId' value sessionid,
+                     key 'userId' value userid,
+                     key 'entryId' value entryid,
+                     key 'userhost' value userhost,
+                     key 'returncode' value returncode,
+                     key 'timestamp' value to_char(
+               ntimestamp#,
+               'yyyy-mm-dd hh24:mi:ss'
+            ),
+                     key 'sqltext' value sqltext,
+                     key 'objectName' value obj_name,
+                     key 'objectOwner' value owner_rec.obj$creator
+         returning clob)
+      returning clob))
+        into a_json
+        from sys.aud$
+       where obj$name = upper(obj_name)
+         and obj$creator = upper(owner_rec.obj$creator);
+
+      convert_clob_2_file(
+         p_clob     => a_json,
+         p_dir      => 'JSON_DIR',
+         p_filename => a_filename
+      );
+      execute immediate 'delete from SYS.AUD$ where obj$name = upper(:1) and obj$creator = upper(:2)'
+         using obj_name,
+         owner_rec.obj$creator;
+   end loop;
+   commit;
+exception
+   when others then
+      dbms_output.put_line('Error occurred: ' || sqlerrm);
+      raise;
+end;
+/
+
+exec save_audit_to_json('client_extins');
+exec save_audit_to_json('echipament');
+exec save_audit_to_json('account_mapping');
+
+ -- create audit jobs
+declare
+   job_names odcivarchar2list := odcivarchar2list(
+      'client_extins',
+      'echipament',
+      'account_mapping',
+      'supliment'
+   );
+begin
+   for i in 1..job_names.count loop
+      dbms_scheduler.create_job(
+         job_name        => 'SAVE_AUDIT_TO_JSON_JOB_' || upper(job_names(i)),
+         job_type        => 'PLSQL_BLOCK',
+         job_action      => 'BEGIN save_audit_to_json('''
+                       || upper(job_names(i))
+                       || '''); END;',
+         start_date      => systimestamp,
+         repeat_interval => 'FREQ=DAILY; BYHOUR=17; BYMINUTE=22; BYSECOND=0',
+         enabled         => true
+      );
+   end loop;
+end;
+/
+
+-- drop audit jobs
+-- declare
+--    job_names odcivarchar2list;
+-- begin
+--    select job_name
+--    bulk collect
+--      into job_names
+--      from user_scheduler_jobs
+--     where job_name like 'SAVE_AUDIT_TO_JSON_JOB_%';
+--    for i in 1..job_names.count loop
+--       dbms_scheduler.drop_job(job_name => upper(job_names(i)));
+--    end loop;
+
+-- end;
+-- /
+
+-- noaudit all on bro_admin.client_extins;
+-- noaudit all on bro_admin.echipament;
+-- noaudit all on bro_admin.account_mapping;
+-- noaudit all on bro_admin.supliment;
+
+select * from dba_audit_trail 
+where username like upper('bro%');
+
+SELECT * FROM dba_scheduler_jobs
+WHERE job_name LIKE upper('save_audit_to_json_job_%')
+ORDER BY job_name;
+
+----------------BRO ADMIN----------------
+--Trigger-i de auditare
+--bro_admin_audit.sql
+
+create or replace type t_echipament as object (
+      id_echipament  int,
+      nume           varchar2(40),
+      data_instalare date,
+      data_revizie   date,
+      id_filiala     int,
+      id_furnizor    int
+);
+/
+
+create table audit_echipament (
+   id_audit        int
+      generated by default as identity
+   primary key,
+   log_time        timestamp default systimestamp,
+   operation_type  varchar2(15),
+   performed_by    varchar2(128),
+   id_echipament   int,
+   old_values      t_echipament,
+   new_values      t_echipament,
+   summary_message varchar2(2500)
+);
+
+
+
+create or replace trigger audit_echipament_trg for
+   insert or update or delete on echipament
+compound trigger
+   type t_row_change is record (
+         operation_type varchar2(15),
+         id_echipament  int,
+         old_values     t_echipament,
+         new_values     t_echipament
+   );
+   type t_change_table is
+      table of t_row_change index by pls_integer;
+   g_changes  t_change_table;
+   g_count_op int := 0;
+   before each row is begin
+      if inserting then
+         g_count_op := g_count_op + 1;
+         g_changes(g_changes.count + 1) := t_row_change(
+            'INSERT',
+            :new.id_echipament,
+            null,
+            t_echipament(
+               :new.id_echipament,
+               :new.nume,
+               :new.data_instalare,
+               :new.data_revizie,
+               :new.id_filiala,
+               :new.id_furnizor
+            )
+         );
+      elsif updating then
+         g_count_op := g_count_op + 1;
+         g_changes(g_changes.count + 1) := t_row_change(
+            'UPDATE',
+            :new.id_echipament,
+            t_echipament(
+               :old.id_echipament,
+               :old.nume,
+               :old.data_instalare,
+               :old.data_revizie,
+               :old.id_filiala,
+               :old.id_furnizor
+            ),
+            t_echipament(
+               :new.id_echipament,
+               :new.nume,
+               :new.data_instalare,
+               :new.data_revizie,
+               :new.id_filiala,
+               :new.id_furnizor
+            )
+         );
+      elsif deleting then
+         g_count_op := g_count_op + 1;
+         g_changes(g_changes.count + 1) := t_row_change(
+            'DELETE',
+            :old.id_echipament,
+            t_echipament(
+               :old.id_echipament,
+               :old.nume,
+               :old.data_instalare,
+               :old.data_revizie,
+               :old.id_filiala,
+               :old.id_furnizor
+            ),
+            null
+         );
+      end if;
+   end before each row;
+   after statement is begin
+      for i in 1..g_changes.count loop
+         insert into audit_echipament (
+            operation_type,
+            performed_by,
+            id_echipament,
+            old_values,
+            new_values,
+            summary_message
+         ) values ( g_changes(i).operation_type,
+                    user,
+                    g_changes(i).id_echipament,
+                    g_changes(i).old_values,
+                    g_changes(i).new_values,
+                    upper(g_changes(i).operation_type)
+                    || ' with another '
+                    || g_count_op );
+      end loop;
+   end after statement;
+end;
+/
+
+select * from audit_echipament;
+
+select a.old_values.data_revizie, a.new_values.data_revizie from audit_echipament a;
+
+grant select,update on audit_echipament to bro_manager_filiala1; 
+
+
+select count(*)
+from audit_echipament a 
+where a.old_values.id_filiala!=1 and a.new_values.id_filiala!=1;
+
+
+----------------SYS----------------
+--Politici de auditare
+--sys_audit_2.sql
+
+alter session set container = orclpdb;
+
+create or replace directory fgadump_dir as 'D:\OracleEE\install\admin\orcl\fgadump';
+
+-- salvare intr-un fisier txt a logurilor
+create or replace procedure bro_audit_tablese_handler (
+   object_schema varchar2,
+   object_name   varchar2,
+   policy_name   varchar2
+) is
+   fga_file    utl_file.file_type;
+   log_message varchar2(5000);
+begin
+   log_message := 'FGA Triggered:'
+                  || chr(10)
+                  || 'Timestamp: '
+                  || to_char(
+      sysdate,
+      'YYYY-MM-DD HH24:MI:SS'
+   )
+                  || chr(10)
+                  || 'Object Schema: '
+                  || object_schema
+                  || chr(10)
+                  || 'Object Name: '
+                  || object_name
+                  || chr(10)
+                  || 'Policy Name: '
+                  || policy_name
+                  || chr(10);
+   fga_file := utl_file.fopen(
+      'FGADUMP_DIR',
+      policy_name || '.txt',
+      'a'
+   );
+   utl_file.put_line(
+      fga_file,
+      log_message
+   );
+   utl_file.fflush(fga_file);
+   utl_file.fclose(fga_file);
+exception
+   when others then
+      if utl_file.is_open(fga_file) then
+         utl_file.fclose(fga_file);
+      end if;
+      raise;
+end;
+/
+
+create or replace procedure echipament_revizie_audit is
+begin
+   dbms_fga.add_policy(
+      object_schema   => 'BRO_ADMIN',
+      object_name     => 'ECHIPAMENT',
+      policy_name     => 'AUDIT_DATA_REVIZIE',
+      audit_condition => 'data_revizie IS NOT NULL',
+      audit_column    => 'data_revizie',
+      handler_schema  => 'SYS',
+      handler_module  => 'bro_audit_tablese_handler',
+      enable          => true,
+      statement_types => 'insert,update'
+   );
+end;
+/
+
+exec echipament_revizie_audit();
+
+
+select *
+  from dba_fga_audit_trail
+ where policy_name = 'AUDIT_DATA_REVIZIE';
+
+
+begin
+   dbms_fga.enable_policy(
+      object_schema => 'BRO_ADMIN',
+      object_name   => 'ECHIPAMENT',
+      policy_name   => 'AUDIT_DATA_REVIZIE'
+   );
+end;
+/
+
+
+-- begin
+--    dbms_fga.disable_policy(
+--       object_schema => 'BRO_ADMIN',
+--       object_name   => 'ECHIPAMENT',
+--       policy_name   => 'AUDIT_DATA_REVIZIE'
+--    );
+-- end;
+-- /
+
+-- begin
+--    dbms_fga.drop_policy(
+--       object_schema => 'BRO_ADMIN',
+--       object_name   => 'ECHIPAMENT',
+--       policy_name   => 'AUDIT_DATA_REVIZIE'
+--    );
+-- end;
+-- /
